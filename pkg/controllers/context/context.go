@@ -30,6 +30,7 @@ import (
 
 	fedclient "github.com/kubewharf/kubeadmiral/pkg/client/clientset/versioned"
 	fedinformers "github.com/kubewharf/kubeadmiral/pkg/client/informers/externalversions"
+	schedulerframework "github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
 	"github.com/kubewharf/kubeadmiral/pkg/stats"
 	"github.com/kubewharf/kubeadmiral/pkg/util/informermanager"
 )
@@ -86,4 +87,5 @@ type ComponentConfig struct {
 	EnableKatalystSupport         bool
 	ClusterHealthCheckPeriod      time.Duration
 	ClusterStatusThreshold        time.Duration
+	PendingPlacementLedger        schedulerframework.LedgerConfig
 }

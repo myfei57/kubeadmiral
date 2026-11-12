@@ -33,14 +33,40 @@ import (
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/plugins/names"
 )
 
-type ClusterResourcesFit struct{}
+type ClusterResourcesFit struct {
+	handle framework.Handle
+}
 
-func NewClusterResourcesFit(_ framework.Handle) (framework.Plugin, error) {
-	return &ClusterResourcesFit{}, nil
+func NewClusterResourcesFit(handle framework.Handle) (framework.Plugin, error) {
+	return &ClusterResourcesFit{handle: handle}, nil
 }
 
 func (pl *ClusterResourcesFit) Name() string {
 	return names.ClusterResourcesFit
+}
+
+// pendingReservations returns the aggregate in-flight reservation vector on the cluster excluding the
+// scheduling unit's own attempt. It returns nil when the ledger is disabled or the unit carries no
+// federated identity, which preserves the original Fit computation exactly.
+func (pl *ClusterResourcesFit) pendingReservations(
+	su *framework.SchedulingUnit,
+	cluster *fedcorev1a1.FederatedCluster,
+) *framework.Resource {
+	if pl.handle == nil || su.FederatedUID == "" {
+		return nil
+	}
+	ledger := pl.handle.PendingPlacementLedger()
+	if ledger == nil {
+		return nil
+	}
+	exclude := &framework.LedgerKey{
+		FederatedUID:        su.FederatedUID,
+		FederatedGeneration: su.FederatedGeneration,
+		ClusterUID:          cluster.UID,
+		Attempt:             su.ScheduleAttempt,
+	}
+	reserved := ledger.ReservedResources(cluster.UID, exclude)
+	return &reserved
 }
 
 // TODO(all), implement filter for socket and Best Effort resources.
@@ -63,7 +89,7 @@ func (pl *ClusterResourcesFit) Filter(
 		return framework.NewResult(framework.Success)
 	}
 
-	insufficientResources := fitsRequest(su, cluster)
+	insufficientResources := fitsRequest(su, cluster, pl.pendingReservations(su, cluster))
 
 	if len(insufficientResources) != 0 {
 		// We will keep all failure reasons.
@@ -77,7 +103,11 @@ func (pl *ClusterResourcesFit) Filter(
 	return framework.NewResult(framework.Success)
 }
 
-func fitsRequest(su *framework.SchedulingUnit, cluster *fedcorev1a1.FederatedCluster) []framework.InsufficientResource {
+func fitsRequest(
+	su *framework.SchedulingUnit,
+	cluster *fedcorev1a1.FederatedCluster,
+	pendingReservations *framework.Resource,
+) []framework.InsufficientResource {
 	insufficientResources := make([]framework.InsufficientResource, 0, 4)
 	scRequest := getSchedulingUnitRequestResource(su)
 	clusterAllocatable := getFederatedClusterAllocatableResource(cluster)
@@ -93,21 +123,28 @@ func fitsRequest(su *framework.SchedulingUnit, cluster *fedcorev1a1.FederatedClu
 		return insufficientResources
 	}
 
-	if clusterAllocatable.MilliCPU < scRequest.MilliCPU+clusterRequest.MilliCPU {
+	reservedMilliCPU := int64(0)
+	reservedMemory := int64(0)
+	if pendingReservations != nil {
+		reservedMilliCPU = pendingReservations.MilliCPU
+		reservedMemory = pendingReservations.Memory
+	}
+
+	if clusterAllocatable.MilliCPU < scRequest.MilliCPU+clusterRequest.MilliCPU+reservedMilliCPU {
 		insufficientResources = append(insufficientResources, framework.InsufficientResource{
 			ResourceName: corev1.ResourceCPU,
 			Reason:       "Insufficient cpu",
 			Requested:    scRequest.MilliCPU,
-			Used:         clusterRequest.MilliCPU,
+			Used:         clusterRequest.MilliCPU + reservedMilliCPU,
 			Capacity:     clusterAllocatable.MilliCPU,
 		})
 	}
-	if clusterAllocatable.Memory < scRequest.Memory+clusterRequest.Memory {
+	if clusterAllocatable.Memory < scRequest.Memory+clusterRequest.Memory+reservedMemory {
 		insufficientResources = append(insufficientResources, framework.InsufficientResource{
 			ResourceName: corev1.ResourceMemory,
 			Reason:       "Insufficient memory",
 			Requested:    scRequest.Memory,
-			Used:         clusterRequest.Memory,
+			Used:         clusterRequest.Memory + reservedMemory,
 			Capacity:     clusterAllocatable.Memory,
 		})
 	}
@@ -126,12 +163,16 @@ func fitsRequest(su *framework.SchedulingUnit, cluster *fedcorev1a1.FederatedClu
 		if rQuant <= 0 {
 			continue
 		}
-		if clusterAllocatable.ScalarResources[rName] < rQuant+clusterRequest.ScalarResources[rName] {
+		reservedScalar := int64(0)
+		if pendingReservations != nil {
+			reservedScalar = pendingReservations.ScalarResources[rName]
+		}
+		if clusterAllocatable.ScalarResources[rName] < rQuant+clusterRequest.ScalarResources[rName]+reservedScalar {
 			insufficientResources = append(insufficientResources, framework.InsufficientResource{
 				ResourceName: rName,
 				Reason:       fmt.Sprintf("Insufficient %v", rName),
 				Requested:    scRequest.ScalarResources[rName],
-				Used:         clusterRequest.ScalarResources[rName],
+				Used:         clusterRequest.ScalarResources[rName] + reservedScalar,
 				Capacity:     clusterAllocatable.ScalarResources[rName],
 			})
 		}

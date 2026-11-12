@@ -205,6 +205,7 @@ func startScheduler(
 		klog.Background(),
 		controllerCtx.WorkerCount,
 		controllerCtx.ComponentConfig.EnableKatalystSupport,
+		controllerCtx.ComponentConfig.PendingPlacementLedger,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating scheduler: %w", err)

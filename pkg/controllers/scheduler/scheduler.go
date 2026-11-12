@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -47,6 +48,7 @@ import (
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/core"
 	frameworktypes "github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/plugins/names"
+	schedulerledger "github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/ledger"
 	"github.com/kubewharf/kubeadmiral/pkg/stats"
 	utilmetrics "github.com/kubewharf/kubeadmiral/pkg/stats/metrics"
 	clusterutil "github.com/kubewharf/kubeadmiral/pkg/util/cluster"
@@ -99,6 +101,17 @@ type Scheduler struct {
 
 	enableKatalystSupport bool
 
+	// ledgerConfig and ledger power the optional PendingPlacementLedger. ledger is nil when the feature
+	// is disabled, in which case scheduling behaves exactly as before.
+	ledgerConfig frameworktypes.LedgerConfig
+	ledger       frameworktypes.PendingPlacementLedger
+
+	// attemptMu guards the per-object attempt bookkeeping and the federated UID index used to release
+	// reservations deterministically on deletion.
+	attemptMu sync.Mutex
+	attempts  map[string]attemptState
+	knownUIDs map[string]types.UID
+
 	metrics stats.Metrics
 	logger  klog.Logger
 }
@@ -123,6 +136,7 @@ func NewScheduler(
 	logger klog.Logger,
 	workerCount int,
 	enableKatalystSupport bool,
+	ledgerConfig frameworktypes.LedgerConfig,
 ) (*Scheduler, error) {
 	s := &Scheduler{
 		fedClient:                        fedClient,
@@ -139,6 +153,12 @@ func NewScheduler(
 		metrics:                          metrics,
 		logger:                           logger.WithValues("controller", SchedulerName),
 		enableKatalystSupport:            enableKatalystSupport,
+		ledgerConfig:                     ledgerConfig,
+		attempts:                         make(map[string]attemptState),
+		knownUIDs:                        make(map[string]types.UID),
+	}
+	if ledgerConfig.Enabled {
+		s.ledger = schedulerledger.NewPendingPlacementLedger(ledgerConfig)
 	}
 
 	s.eventRecorder = eventsink.NewDefederatingRecorderMux(kubeClient, SchedulerName, 6)
@@ -259,6 +279,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 	logger.Info("Caches are synced")
 
+	if s.ledger != nil {
+		// A fresh leader epoch starts with a bounded rebuild. Admission fails closed until reconstruction
+		// completes; on shutdown the epoch is explicitly invalidated so no stale placement can be committed.
+		if err := s.rebuildLedger(ctx); err != nil {
+			logger.Info("Ledger rebuild interrupted before completion", "err", err.Error())
+			return
+		}
+		go s.runLedgerSweeper(ctx)
+		defer s.ledger.Deactivate()
+	}
+
 	s.worker.Run(ctx)
 	<-ctx.Done()
 }
@@ -287,10 +318,24 @@ func (s *Scheduler) reconcile(ctx context.Context, key common.QualifiedName) (st
 	}
 	if apierrors.IsNotFound(err) || fedObject.GetDeletionTimestamp() != nil {
 		logger.V(3).Info("Observed FederatedObject deletion")
+		if s.ledger != nil {
+			// Deletion cancels every in-flight reservation of the object across all attempts.
+			if apierrors.IsNotFound(err) {
+				if uid, ok := s.forgetFederatedUID(key.String()); ok {
+					s.ledger.ReleaseFederatedObject(uid)
+				}
+			} else {
+				s.ledger.ReleaseFederatedObject(fedObject.GetUID())
+				s.forgetFederatedUID(key.String())
+			}
+		}
 		return worker.StatusAllOK
 	}
 
 	fedObject = fedObject.DeepCopyGenericFederatedObject()
+	if s.ledger != nil {
+		s.trackFederatedUID(key.String(), fedObject.GetUID())
+	}
 
 	templateMetadata, err := fedObject.GetSpec().GetTemplateMetadata()
 	if err != nil {
@@ -323,7 +368,12 @@ func (s *Scheduler) reconcile(ctx context.Context, key common.QualifiedName) (st
 		)
 	}
 
-	result, earlyReturnWorkerResult := s.schedule(ctx, ftc, fedObject, policy, schedulingProfile, clusters)
+	if s.ledger != nil {
+		// Settle existing reservations against the freshest member evidence before admitting anything new.
+		s.reconcileLedger(fedObject, clusters)
+	}
+
+	result, reservedAttempt, earlyReturnWorkerResult := s.schedule(ctx, ftc, fedObject, policy, schedulingProfile, clusters)
 	if earlyReturnWorkerResult != nil && !earlyReturnWorkerResult.Success {
 		return *earlyReturnWorkerResult
 	}
@@ -351,7 +401,22 @@ func (s *Scheduler) reconcile(ctx context.Context, key common.QualifiedName) (st
 		}
 	}
 
-	return s.persistSchedulingResult(ctx, ftc, fedObject, *result, auxInfo)
+	persistResult := s.persistSchedulingResult(ctx, ftc, fedObject, *result, auxInfo)
+	if s.ledger != nil && reservedAttempt != nil {
+		if !persistResult.Success {
+			// The committed placement could not be persisted; the owning attempt alone is reclaimed.
+			s.ledger.ReleaseAttempt(frameworktypes.LedgerKey{
+				FederatedUID:        reservedAttempt.uid,
+				FederatedGeneration: reservedAttempt.generation,
+				Attempt:             reservedAttempt.attempt,
+			})
+		} else {
+			// The new plan is durable; supersede older attempts of the same generation without touching
+			// any other federated object.
+			s.ledger.ReleasePriorAttempts(reservedAttempt.uid, reservedAttempt.generation, reservedAttempt.attempt)
+		}
+	}
+	return persistResult
 }
 
 func (s *Scheduler) prepareToSchedule(
@@ -540,7 +605,7 @@ func (s *Scheduler) schedule(
 	policy fedcorev1a1.GenericPropagationPolicy,
 	schedulingProfile *fedcorev1a1.SchedulingProfile,
 	clusters []*fedcorev1a1.FederatedCluster,
-) (scheduleResult *core.ScheduleResult, workerResult *worker.Result) {
+) (scheduleResult *core.ScheduleResult, reservedAttempt *attemptState, workerResult *worker.Result) {
 	logger := klog.FromContext(ctx)
 
 	if policy == nil {
@@ -553,7 +618,11 @@ func (s *Scheduler) schedule(
 			"No scheduling policy specified, will schedule object to no clusters",
 		)
 
-		return &core.ScheduleResult{SuggestedClusters: make(map[string]*int64)}, nil
+		if s.ledger != nil {
+			// Descheduling cancels every in-flight reservation of the object.
+			s.ledger.ReleaseFederatedObject(fedObject.GetUID())
+		}
+		return &core.ScheduleResult{SuggestedClusters: make(map[string]*int64)}, nil, nil
 	}
 
 	startTime := time.Now()
@@ -581,7 +650,23 @@ func (s *Scheduler) schedule(
 			"Failed to schedule object: %v",
 			fmt.Errorf("failed to get scheduling unit: %w", err),
 		)
-		return nil, &worker.StatusError
+		return nil, nil, &worker.StatusError
+	}
+
+	var currentAttempt attemptState
+	if s.ledger != nil {
+		// Bind the scheduling unit to its exact federated identity so the Fit plugin and the ledger can
+		// distinguish attempts and never cross-release them.
+		key := common.NewQualifiedName(fedObject).String()
+		attempt := s.nextAttempt(key, fedObject.GetUID(), fedObject.GetGeneration())
+		schedulingUnit.FederatedUID = fedObject.GetUID()
+		schedulingUnit.FederatedGeneration = fedObject.GetGeneration()
+		schedulingUnit.ScheduleAttempt = attempt
+		currentAttempt = attemptState{
+			uid:        fedObject.GetUID(),
+			generation: fedObject.GetGeneration(),
+			attempt:    attempt,
+		}
 	}
 
 	var replicasPlugin []string
@@ -600,7 +685,7 @@ func (s *Scheduler) schedule(
 			fmt.Errorf("failed to construct scheduling profile: %w", err),
 		)
 
-		return nil, &worker.StatusError
+		return nil, nil, &worker.StatusError
 	}
 
 	ctx = klog.NewContext(ctx, logger)
@@ -614,7 +699,7 @@ func (s *Scheduler) schedule(
 				corev1.EventTypeWarning,
 				EventReasonScheduleFederatedObject,
 				err.Error())
-			return &result, &worker.StatusAllOK
+			return &result, nil, &worker.StatusAllOK
 		}
 		logger.Error(err, "Failed to compute scheduling result")
 		s.eventRecorder.Eventf(
@@ -624,10 +709,19 @@ func (s *Scheduler) schedule(
 			"Failed to schedule object: %v",
 			fmt.Errorf("failed to compute scheduling result: %w", err),
 		)
-		return nil, &worker.StatusError
+		return nil, nil, &worker.StatusError
 	}
 
-	return &result, &worker.StatusAllOK
+	if s.ledger != nil {
+		// Atomically reserve the whole multi-cluster plan before any placement is persisted. A failed
+		// reservation means no account (and no placement) was committed.
+		if ledgerResult := s.reserveSchedulingResult(ctx, fedObject, schedulingUnit, result, clusters); ledgerResult != nil {
+			return nil, nil, ledgerResult
+		}
+		return &result, &currentAttempt, &worker.StatusAllOK
+	}
+
+	return &result, nil, &worker.StatusAllOK
 }
 
 func (s *Scheduler) persistSchedulingResult(

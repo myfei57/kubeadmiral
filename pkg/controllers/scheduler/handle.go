@@ -26,13 +26,19 @@ import (
 func (s *Scheduler) buildFrameworkHandle() framework.Handle {
 	return &handle{
 		dynamicClient: s.dynamicClient,
+		ledger:        s.ledger,
 	}
 }
 
 type handle struct {
 	dynamicClient dynamic.Interface
+	ledger        framework.PendingPlacementLedger
 }
 
 func (f *handle) DynamicClient() dynamic.Interface {
 	return f.dynamicClient
+}
+
+func (f *handle) PendingPlacementLedger() framework.PendingPlacementLedger {
+	return f.ledger
 }

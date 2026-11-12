@@ -38,6 +38,7 @@ import (
 	fedinformers "github.com/kubewharf/kubeadmiral/pkg/client/informers/externalversions"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/common"
 	controllercontext "github.com/kubewharf/kubeadmiral/pkg/controllers/context"
+	schedulerframework "github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
 	"github.com/kubewharf/kubeadmiral/pkg/stats"
 	prometheusstats "github.com/kubewharf/kubeadmiral/pkg/stats/prometheus"
 	clusterutil "github.com/kubewharf/kubeadmiral/pkg/util/cluster"
@@ -186,6 +187,15 @@ func getComponentConfig(opts *options.Options) (*controllercontext.ComponentConf
 		EnableKatalystSupport:    opts.EnableKatalystSupport,
 		ClusterHealthCheckPeriod: opts.ClusterHealthCheckPeriod,
 		ClusterStatusThreshold:   opts.ClusterStatusThreshold,
+		PendingPlacementLedger: schedulerframework.LedgerConfig{
+			Enabled:                       opts.EnablePendingPlacementLedger,
+			TTL:                           opts.PendingPlacementLedgerTTL,
+			MaxAccounts:                   opts.PendingPlacementLedgerMaxAccounts,
+			MaxAccountsPerCluster:         opts.PendingPlacementLedgerMaxPerCluster,
+			MaxAccountsPerFederatedObject: opts.PendingPlacementLedgerMaxPerObject,
+			MaxWaiters:                    opts.PendingPlacementLedgerMaxWaiters,
+			ReserveTimeout:                opts.PendingPlacementLedgerReserveTimeout,
+		},
 	}
 
 	if opts.ClusterHealthCheckPeriod < options.MinClusterHealthCheckPeriod {

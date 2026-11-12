@@ -70,6 +70,14 @@ type Options struct {
 
 	EnableKatalystSupport    bool
 	ClusterHealthCheckPeriod time.Duration
+
+	EnablePendingPlacementLedger         bool
+	PendingPlacementLedgerTTL            time.Duration
+	PendingPlacementLedgerMaxAccounts    int
+	PendingPlacementLedgerMaxPerCluster  int
+	PendingPlacementLedgerMaxPerObject   int
+	PendingPlacementLedgerMaxWaiters     int
+	PendingPlacementLedgerReserveTimeout time.Duration
 }
 
 func NewOptions() *Options {
@@ -181,6 +189,52 @@ func (o *Options) AddFlags(flags *pflag.FlagSet, allControllers []string, disabl
 		"cluster-status-threshold",
 		time.Second*100,
 		"The threshold of member clusters status change.",
+	)
+
+	flags.BoolVar(
+		&o.EnablePendingPlacementLedger,
+		"enable-pending-placement-ledger",
+		false,
+		"Enable the leader-local pending placement ledger, which reserves cluster resource vectors for "+
+			"placement demands not yet observably accounted for by member clusters. Disabled by default and, "+
+			"when disabled, the original ClusterResourcesFit computation is unchanged.",
+	)
+	flags.DurationVar(
+		&o.PendingPlacementLedgerTTL,
+		"pending-placement-ledger-ttl",
+		10*time.Minute,
+		"Maximum lifetime an unconfirmed pending placement reservation may be retained before being flagged stale. "+
+			"Stale reservations keep consuming capacity; TTL expiry alone never releases them without confirmation evidence.",
+	)
+	flags.IntVar(
+		&o.PendingPlacementLedgerMaxAccounts,
+		"pending-placement-ledger-max-accounts",
+		10000,
+		"Maximum total number of reservation accounts held by the pending placement ledger.",
+	)
+	flags.IntVar(
+		&o.PendingPlacementLedgerMaxPerCluster,
+		"pending-placement-ledger-max-accounts-per-cluster",
+		1000,
+		"Maximum number of pending placement reservation accounts on a single cluster.",
+	)
+	flags.IntVar(
+		&o.PendingPlacementLedgerMaxPerObject,
+		"pending-placement-ledger-max-accounts-per-object",
+		256,
+		"Maximum number of pending placement reservation accounts belonging to a single federated object.",
+	)
+	flags.IntVar(
+		&o.PendingPlacementLedgerMaxWaiters,
+		"pending-placement-ledger-max-waiters",
+		128,
+		"Maximum number of concurrent fair-waiting reservation requests; overflow requests are rejected.",
+	)
+	flags.DurationVar(
+		&o.PendingPlacementLedgerReserveTimeout,
+		"pending-placement-ledger-reserve-timeout",
+		5*time.Second,
+		"Maximum time a reservation request may fairly wait for cluster capacity before failing and requeuing.",
 	)
 }
 

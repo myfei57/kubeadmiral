@@ -85,4 +85,8 @@ type ReplicasPlugin interface {
 
 type Handle interface {
 	DynamicClient() dynamic.Interface
+
+	// PendingPlacementLedger returns the optional leader-local ledger of in-flight placement reservations.
+	// It returns nil when the feature is disabled, in which case the plugins must behave exactly as before.
+	PendingPlacementLedger() PendingPlacementLedger
 }

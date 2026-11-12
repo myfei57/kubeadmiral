@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	fedcorev1a1 "github.com/kubewharf/kubeadmiral/pkg/apis/core/v1alpha1"
@@ -43,6 +44,13 @@ type SchedulingUnit struct {
 	Name        string
 	Labels      map[string]string
 	Annotations map[string]string
+
+	// FederatedUID and FederatedGeneration identify the owning FederatedObject / ClusterFederatedObject.
+	// Together with ScheduleAttempt they scope pending placement ledger accounts. They are left zero when
+	// the ledger is disabled or the scheduling unit is built outside the scheduler.
+	FederatedUID        types.UID
+	FederatedGeneration int64
+	ScheduleAttempt     int64
 
 	// Only care about the requests resources
 	// TODO(all), limit resources, Best Effort resources

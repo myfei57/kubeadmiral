@@ -309,6 +309,7 @@ func doTest(t *testing.T, clientTLS *fedcorev1a1.WebhookTLSConfig, serverTLS *tl
 		ktesting.NewLogger(t, ktesting.NewConfig(ktesting.Verbosity(3))),
 		1,
 		false,
+		framework.LedgerConfig{},
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
