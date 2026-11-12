@@ -68,8 +68,11 @@ type Options struct {
 
 	ResourceAggregationNodeFilter []string
 
-	EnableKatalystSupport    bool
-	ClusterHealthCheckPeriod time.Duration
+	EnableKatalystSupport bool
+	// EnableSchedulingDecisionTrace enables bounded structured
+	// SchedulingDecisionTrace collection for real scheduling runs.
+	EnableSchedulingDecisionTrace bool
+	ClusterHealthCheckPeriod      time.Duration
 }
 
 func NewOptions() *Options {
@@ -168,6 +171,13 @@ func (o *Options) AddFlags(flags *pflag.FlagSet, allControllers []string, disabl
 			"will collect katalyst CNR resource into FederatedCluster if katalyst plugin was enabled in its "+
 			"annotations, and the scheduler will enable KatalystResourcesExist filter and support split replicas "+
 			"by katalyst resources.",
+	)
+	flags.BoolVar(
+		&o.EnableSchedulingDecisionTrace,
+		"enable-scheduling-decision-trace",
+		false,
+		"Enable bounded structured SchedulingDecisionTrace collection for real scheduling runs. Traces are built "+
+			"from framework hook observations only and emitted as controller logs; scheduling behavior is unchanged.",
 	)
 	flags.DurationVar(
 		&o.ClusterHealthCheckPeriod,

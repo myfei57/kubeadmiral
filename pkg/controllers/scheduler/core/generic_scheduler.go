@@ -33,6 +33,7 @@ import (
 
 	fedcorev1a1 "github.com/kubewharf/kubeadmiral/pkg/apis/core/v1alpha1"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
+	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/trace"
 )
 
 type ScheduleAlgorithm interface {
@@ -97,20 +98,39 @@ func (g *genericScheduler) Schedule(
 	clusters []*fedcorev1a1.FederatedCluster,
 ) (result ScheduleResult, err error) {
 	logger := klog.FromContext(ctx)
+	observer := trace.ObserverFromContext(ctx)
+	if observer != nil {
+		observer.Begin()
+	}
 
 	// we do not reschedule if sticky cluster is enabled
 	if schedulingUnit.StickyCluster && len(schedulingUnit.CurrentClusters) > 0 {
 		result.SuggestedClusters = schedulingUnit.CurrentClusters
+		if observer != nil {
+			observer.RecordScheduleSkipped("sticky cluster enabled, rescheduling bypassed")
+		}
 		return result, nil
 	}
 
 	feasibleClusters, diagnosis, err := g.findClustersThatFitWorkload(ctx, fwk, schedulingUnit, clusters)
 	if err != nil {
+		if observer != nil {
+			observer.Finish(trace.OutcomeFailed, trace.StageFilter)
+		}
 		return result, fmt.Errorf("failed to findClustersThatFitWorkload: %w", err)
 	}
 	logger.V(2).
 		Info("Clusters filtered", "result", spew.Sprint(feasibleClusters))
+	if observer != nil {
+		observer.RecordFilterOutcome(
+			framework.ExtractClusterNames(feasibleClusters),
+			sets.List(sets.KeySet(diagnosis.ClusterToResultMap)),
+		)
+	}
 	if len(feasibleClusters) == 0 {
+		if observer != nil {
+			observer.Finish(trace.OutcomeInfeasible, trace.StageFilter)
+		}
 		return result, &framework.FitError{
 			NumAllClusters: len(clusters),
 			Diagnosis:      diagnosis,
@@ -119,6 +139,9 @@ func (g *genericScheduler) Schedule(
 
 	clusterScores, err := g.scoreClusters(ctx, fwk, schedulingUnit, feasibleClusters)
 	if err != nil {
+		if observer != nil {
+			observer.Finish(trace.OutcomeFailed, trace.StageScore)
+		}
 		return result, fmt.Errorf("failed to scoreClusters: %w", err)
 	}
 	logger.V(2).
@@ -126,6 +149,9 @@ func (g *genericScheduler) Schedule(
 
 	selectedClusters, err := g.selectClusters(ctx, fwk, schedulingUnit, clusterScores)
 	if err != nil {
+		if observer != nil {
+			observer.Finish(trace.OutcomeFailed, trace.StageSelect)
+		}
 		return result, fmt.Errorf("failed to selectClusters: %w", err)
 	}
 	logger.V(2).Info("Clusters selected", "clusters", spew.Sprint(selectedClusters))
@@ -133,6 +159,10 @@ func (g *genericScheduler) Schedule(
 	// we skip replica scheduling if mode is Duplicate
 	if schedulingUnit.SchedulingMode == fedcorev1a1.SchedulingModeDuplicate {
 		logger.V(3).Info("skip replica scheduling for Duplicate scheduling mode")
+		if observer != nil {
+			observer.RecordReplicasSkipped("duplicate scheduling mode skips replica scheduling")
+			observer.Finish(trace.OutcomeSucceeded, "")
+		}
 		result.SuggestedClusters = make(map[string]*int64, len(selectedClusters))
 		for _, cluster := range selectedClusters {
 			result.SuggestedClusters[cluster.Name] = nil
@@ -142,6 +172,9 @@ func (g *genericScheduler) Schedule(
 
 	clusterReplicaList, err := g.replicaScheduling(ctx, fwk, schedulingUnit, selectedClusters)
 	if err != nil {
+		if observer != nil {
+			observer.Finish(trace.OutcomeFailed, trace.StageReplicas)
+		}
 		return result, fmt.Errorf("failed to do replicaScheduling: %w", err)
 	}
 	logger.V(2).
@@ -149,6 +182,9 @@ func (g *genericScheduler) Schedule(
 	result.SuggestedClusters = make(map[string]*int64, len(clusterReplicaList))
 	for _, clusterReplica := range clusterReplicaList {
 		result.SuggestedClusters[clusterReplica.Cluster.Name] = pointer.Int64(clusterReplica.Replicas)
+	}
+	if observer != nil {
+		observer.Finish(trace.OutcomeSucceeded, "")
 	}
 	return result, nil
 }
@@ -199,7 +235,63 @@ func (g *genericScheduler) scoreClusters(
 			ret[i].Score += scores[j][i].Score
 		}
 	}
+	if ob := trace.ObserverFromContext(ctx); ob != nil {
+		ob.RecordScoreAggregation(buildAggregatedScores(clusters, scores, ret), buildTieGroups(ret))
+	}
 	return ret, nil
+}
+
+// buildAggregatedScores produces per-cluster total scores together with the
+// per-plugin contribution so an explanation cannot rely on the final score
+// alone.
+func buildAggregatedScores(
+	clusters []*fedcorev1a1.FederatedCluster,
+	scores framework.PluginToClusterScore,
+	ret framework.ClusterScoreList,
+) []trace.AggregatedScore {
+	aggregated := make([]trace.AggregatedScore, 0, len(clusters))
+	for i, clusterScore := range ret {
+		pluginScores := make(map[string]int64, len(scores))
+		for pluginName, pluginScoresList := range scores {
+			pluginScores[pluginName] = pluginScoresList[i].Score
+		}
+		aggregated = append(aggregated, trace.AggregatedScore{
+			Cluster:      clusterScore.Cluster.Name,
+			TotalScore:   clusterScore.Score,
+			PluginScores: pluginScores,
+		})
+	}
+	tieGroups := buildTieGroups(ret)
+	clusterToTieGroup := make(map[string]int)
+	for groupIdx, group := range tieGroups {
+		for _, clusterName := range group {
+			clusterToTieGroup[clusterName] = groupIdx + 1
+		}
+	}
+	for i := range aggregated {
+		aggregated[i].TieGroup = clusterToTieGroup[aggregated[i].Cluster]
+	}
+	return aggregated
+}
+
+// buildTieGroups returns the equal-total-score groups in first-appearance
+// order. Only groups with more than one member are returned.
+func buildTieGroups(clusterScores framework.ClusterScoreList) [][]string {
+	scoreToGroup := make(map[int64][]string)
+	order := make([]int64, 0)
+	for _, clusterScore := range clusterScores {
+		if _, exists := scoreToGroup[clusterScore.Score]; !exists {
+			order = append(order, clusterScore.Score)
+		}
+		scoreToGroup[clusterScore.Score] = append(scoreToGroup[clusterScore.Score], clusterScore.Cluster.Name)
+	}
+	groups := make([][]string, 0)
+	for _, score := range order {
+		if group := scoreToGroup[score]; len(group) > 1 {
+			groups = append(groups, group)
+		}
+	}
+	return groups
 }
 
 func (g *genericScheduler) selectClusters(

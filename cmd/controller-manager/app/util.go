@@ -181,11 +181,12 @@ func createControllerContext(opts *options.Options) (*controllercontext.Context,
 
 func getComponentConfig(opts *options.Options) (*controllercontext.ComponentConfig, error) {
 	componentConfig := &controllercontext.ComponentConfig{
-		ClusterJoinTimeout:       opts.ClusterJoinTimeout,
-		MemberObjectEnqueueDelay: opts.MemberObjectEnqueueDelay,
-		EnableKatalystSupport:    opts.EnableKatalystSupport,
-		ClusterHealthCheckPeriod: opts.ClusterHealthCheckPeriod,
-		ClusterStatusThreshold:   opts.ClusterStatusThreshold,
+		ClusterJoinTimeout:            opts.ClusterJoinTimeout,
+		MemberObjectEnqueueDelay:      opts.MemberObjectEnqueueDelay,
+		EnableKatalystSupport:         opts.EnableKatalystSupport,
+		EnableSchedulingDecisionTrace: opts.EnableSchedulingDecisionTrace,
+		ClusterHealthCheckPeriod:      opts.ClusterHealthCheckPeriod,
+		ClusterStatusThreshold:        opts.ClusterStatusThreshold,
 	}
 
 	if opts.ClusterHealthCheckPeriod < options.MinClusterHealthCheckPeriod {

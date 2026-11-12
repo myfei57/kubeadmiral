@@ -84,6 +84,7 @@ type ComponentConfig struct {
 	MemberObjectEnqueueDelay      time.Duration
 	ResourceAggregationNodeFilter []labels.Selector
 	EnableKatalystSupport         bool
+	EnableSchedulingDecisionTrace bool
 	ClusterHealthCheckPeriod      time.Duration
 	ClusterStatusThreshold        time.Duration
 }

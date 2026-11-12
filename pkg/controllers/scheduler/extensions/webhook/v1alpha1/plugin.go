@@ -31,12 +31,14 @@ import (
 	fedcorev1a1 "github.com/kubewharf/kubeadmiral/pkg/apis/core/v1alpha1"
 	schedwebhookv1a1 "github.com/kubewharf/kubeadmiral/pkg/apis/schedulerwebhook/v1alpha1"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
+	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/trace"
 )
 
 var (
-	_ framework.FilterPlugin = &WebhookPlugin{}
-	_ framework.ScorePlugin  = &WebhookPlugin{}
-	_ framework.SelectPlugin = &WebhookPlugin{}
+	_ framework.FilterPlugin     = &WebhookPlugin{}
+	_ framework.ScorePlugin      = &WebhookPlugin{}
+	_ framework.SelectPlugin     = &WebhookPlugin{}
+	_ trace.OpaqueDecisionPlugin = &WebhookPlugin{}
 )
 
 type HTTPClient interface {
@@ -73,6 +75,11 @@ func NewWebhookPlugin(
 func (p *WebhookPlugin) Name() string {
 	return p.name
 }
+
+// SchedulingDecisionOpaque marks webhook-backed decisions as opaque: the
+// external webhook is not required to return an internal rationale, so the
+// trace records only observable outcomes and never fabricates a cause.
+func (p *WebhookPlugin) SchedulingDecisionOpaque() {}
 
 func (p *WebhookPlugin) doRequest(
 	ctx context.Context,

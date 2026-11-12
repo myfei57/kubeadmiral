@@ -27,6 +27,7 @@ import (
 	fedcorev1a1 "github.com/kubewharf/kubeadmiral/pkg/apis/core/v1alpha1"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/plugins/names"
+	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/trace"
 )
 
 type PreferenceBinPack struct{}
@@ -138,6 +139,11 @@ func (pl *PreferenceBinPack) ReplicaScheduling(
 		result[clusterName] += replicas
 	}
 
+	if observer := trace.ObserverFromContext(ctx); observer != nil {
+		observer.RecordReplicaEvidence(buildReplicaEvidence(clusters, clusterPreferences,
+			estimatedCapacity, limitedCapacity, overflow, result))
+	}
+
 	for _, cluster := range clusters {
 		replicas, ok := result[cluster.Name]
 		if !ok || replicas == 0 {
@@ -149,4 +155,38 @@ func (pl *PreferenceBinPack) ReplicaScheduling(
 		})
 	}
 	return clusterReplicasList, framework.NewResult(framework.Success)
+}
+
+// buildReplicaEvidence turns the values observed during this real scheduling
+// run into bounded trace evidence. A missing capacity entry is represented by
+// a nil pointer (unknown), never by a fabricated zero capacity.
+func buildReplicaEvidence(
+	clusters []*fedcorev1a1.FederatedCluster,
+	preferences map[string]ClusterPreferences,
+	estimatedCapacity map[string]int64,
+	limitedCapacity map[string]int64,
+	overflow map[string]int64,
+	allocation map[string]int64,
+) []trace.ReplicaClusterEvidence {
+	evidences := make([]trace.ReplicaClusterEvidence, 0, len(clusters))
+	for _, cluster := range clusters {
+		evidence := trace.ReplicaClusterEvidence{
+			Cluster:  cluster.Name,
+			Replicas: allocation[cluster.Name],
+			Overflow: overflow[cluster.Name],
+		}
+		if capacity, known := estimatedCapacity[cluster.Name]; known {
+			evidence.EstimatedCapacity = pointer.Int64(capacity)
+			evidence.CapacityKnown = true
+		}
+		if capacity, known := limitedCapacity[cluster.Name]; known {
+			evidence.LimitedCapacity = pointer.Int64(capacity)
+		}
+		if preference, ok := preferences[cluster.Name]; ok {
+			evidence.MinReplicas = preference.MinReplicas
+			evidence.MaxReplicas = preference.MaxReplicas
+		}
+		evidences = append(evidences, evidence)
+	}
+	return evidences
 }

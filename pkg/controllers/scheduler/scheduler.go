@@ -20,6 +20,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -47,6 +48,7 @@ import (
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/core"
 	frameworktypes "github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/plugins/names"
+	schedtrace "github.com/kubewharf/kubeadmiral/pkg/controllers/scheduler/framework/trace"
 	"github.com/kubewharf/kubeadmiral/pkg/stats"
 	utilmetrics "github.com/kubewharf/kubeadmiral/pkg/stats/metrics"
 	clusterutil "github.com/kubewharf/kubeadmiral/pkg/util/cluster"
@@ -98,6 +100,7 @@ type Scheduler struct {
 	algorithm core.ScheduleAlgorithm
 
 	enableKatalystSupport bool
+	enableSchedulingTrace bool
 
 	metrics stats.Metrics
 	logger  klog.Logger
@@ -123,6 +126,7 @@ func NewScheduler(
 	logger klog.Logger,
 	workerCount int,
 	enableKatalystSupport bool,
+	enableSchedulingTrace bool,
 ) (*Scheduler, error) {
 	s := &Scheduler{
 		fedClient:                        fedClient,
@@ -139,6 +143,7 @@ func NewScheduler(
 		metrics:                          metrics,
 		logger:                           logger.WithValues("controller", SchedulerName),
 		enableKatalystSupport:            enableKatalystSupport,
+		enableSchedulingTrace:            enableSchedulingTrace,
 	}
 
 	s.eventRecorder = eventsink.NewDefederatingRecorderMux(kubeClient, SchedulerName, 6)
@@ -604,8 +609,25 @@ func (s *Scheduler) schedule(
 	}
 
 	ctx = klog.NewContext(ctx, logger)
+	var observer *schedtrace.Observer
+	if s.enableSchedulingTrace {
+		observer = schedtrace.NewObserver(schedtrace.TraceMeta{
+			FederatedObjectUID:        fedObject.GetUID(),
+			FederatedObjectGeneration: fedObject.GetGeneration(),
+			FederatedObjectKey:        common.NewQualifiedName(fedObject).String(),
+			PolicyDigest:              schedtrace.DigestStruct(policy.GetSpec()),
+			SchedulingProfile:         schedulingProfile.ProfileName(),
+			Clusters:                  schedtrace.BuildClusterSnapshots(clusters, schedtrace.DefaultBudget()),
+		}, nil)
+		ctx = schedtrace.WithObserver(ctx, observer)
+	}
 	var fitErr *frameworktypes.FitError
 	result, err := s.algorithm.Schedule(ctx, framework, *schedulingUnit, clusters)
+	if observer != nil {
+		if encoded, marshalErr := json.Marshal(observer.Snapshot()); marshalErr == nil {
+			logger.V(4).Info("Scheduling decision trace", "trace", string(encoded))
+		}
+	}
 	if err != nil {
 		if errors.As(err, &fitErr) {
 			logger.Info("No available clusters")
