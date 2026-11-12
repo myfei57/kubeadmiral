@@ -40,6 +40,26 @@ type Plugin interface {
 	) (*unstructured.Unstructured, bool, error)
 }
 
+// CoverageAwarePlugin is implemented by aggregator plugins that declare support for the optional
+// CollectedStatusCoverage envelope. When an envelope is available and the plugin declares support,
+// the status aggregator hands the envelope to the plugin instead of raw member cluster objects.
+// The IsResourcePropagated gate result is still passed through: coverage never replaces or bypasses
+// that gate.
+type CoverageAwarePlugin interface {
+	Plugin
+	// SupportsCoverage declares that the plugin understands the coverage envelope protocol.
+	SupportsCoverage() bool
+	// AggregateCoverage aggregates the source object status from an explicit coverage envelope.
+	// resourcePropagated is the retained IsResourcePropagated gate result.
+	AggregateCoverage(
+		ctx context.Context,
+		sourceObject *unstructured.Unstructured,
+		fedObject fedcorev1a1.GenericFederatedObject,
+		coverage *fedcorev1a1.CollectedStatusCoverage,
+		resourcePropagated bool,
+	) (*unstructured.Unstructured, bool, error)
+}
+
 var pluginsMap = map[schema.GroupVersionKind]Plugin{
 	appsv1.SchemeGroupVersion.WithKind(common.DeploymentKind):  NewDeploymentPlugin(),
 	appsv1.SchemeGroupVersion.WithKind(common.StatefulSetKind): NewSingleClusterPlugin(),
@@ -49,4 +69,15 @@ var pluginsMap = map[schema.GroupVersionKind]Plugin{
 
 func GetPlugin(gvk schema.GroupVersionKind) Plugin {
 	return pluginsMap[gvk]
+}
+
+// GetCoveragePlugin returns the coverage-aware plugin for the given GVK, or nil when no plugin
+// declares envelope support. The status aggregator must fall back to the legacy aggregation path
+// in that case.
+func GetCoveragePlugin(gvk schema.GroupVersionKind) CoverageAwarePlugin {
+	plugin, ok := pluginsMap[gvk].(CoverageAwarePlugin)
+	if !ok || !plugin.SupportsCoverage() {
+		return nil
+	}
+	return plugin
 }

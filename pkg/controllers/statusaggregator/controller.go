@@ -38,12 +38,15 @@ import (
 	fedcorev1a1 "github.com/kubewharf/kubeadmiral/pkg/apis/core/v1alpha1"
 	fedclient "github.com/kubewharf/kubeadmiral/pkg/client/clientset/versioned"
 	fedcorev1a1informers "github.com/kubewharf/kubeadmiral/pkg/client/informers/externalversions/core/v1alpha1"
+	"github.com/kubewharf/kubeadmiral/pkg/controllers/common"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/federate"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/statusaggregator/plugins"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/statusaggregator/plugins/sourcefeedback"
 	"github.com/kubewharf/kubeadmiral/pkg/stats"
 	"github.com/kubewharf/kubeadmiral/pkg/stats/metrics"
+	"github.com/kubewharf/kubeadmiral/pkg/util/annotation"
 	clusterutil "github.com/kubewharf/kubeadmiral/pkg/util/cluster"
+	"github.com/kubewharf/kubeadmiral/pkg/util/collectedstatusadapters"
 	"github.com/kubewharf/kubeadmiral/pkg/util/eventhandlers"
 	"github.com/kubewharf/kubeadmiral/pkg/util/eventsink"
 	"github.com/kubewharf/kubeadmiral/pkg/util/fedobjectadapters"
@@ -80,10 +83,12 @@ type StatusAggregator struct {
 	dynamicClient dynamicclient.Interface
 	fedClient     fedclient.Interface
 
-	federatedInformer        informermanager.FederatedInformerManager
-	fedObjectInformer        fedcorev1a1informers.FederatedObjectInformer
-	clusterFedObjectInformer fedcorev1a1informers.ClusterFederatedObjectInformer
-	informerManager          informermanager.InformerManager
+	federatedInformer              informermanager.FederatedInformerManager
+	fedObjectInformer              fedcorev1a1informers.FederatedObjectInformer
+	clusterFedObjectInformer       fedcorev1a1informers.ClusterFederatedObjectInformer
+	collectedStatusInformer        fedcorev1a1informers.CollectedStatusInformer
+	clusterCollectedStatusInformer fedcorev1a1informers.ClusterCollectedStatusInformer
+	informerManager                informermanager.InformerManager
 }
 
 type reconcileKey struct {
@@ -109,6 +114,8 @@ func NewStatusAggregatorController(
 	fedClient fedclient.Interface,
 	fedObjectInformer fedcorev1a1informers.FederatedObjectInformer,
 	clusterFedObjectInformer fedcorev1a1informers.ClusterFederatedObjectInformer,
+	collectedStatusInformer fedcorev1a1informers.CollectedStatusInformer,
+	clusterCollectedStatusInformer fedcorev1a1informers.ClusterCollectedStatusInformer,
 	federatedInformer informermanager.FederatedInformerManager,
 	informerManager informermanager.InformerManager,
 	metrics stats.Metrics,
@@ -132,10 +139,12 @@ func NewStatusAggregatorController(
 		dynamicClient: dynamicClient,
 		fedClient:     fedClient,
 
-		fedObjectInformer:        fedObjectInformer,
-		clusterFedObjectInformer: clusterFedObjectInformer,
-		federatedInformer:        federatedInformer,
-		informerManager:          informerManager,
+		fedObjectInformer:              fedObjectInformer,
+		clusterFedObjectInformer:       clusterFedObjectInformer,
+		collectedStatusInformer:        collectedStatusInformer,
+		clusterCollectedStatusInformer: clusterCollectedStatusInformer,
+		federatedInformer:              federatedInformer,
+		informerManager:                informerManager,
 	}
 
 	a.worker = worker.NewReconcileWorker[reconcileKey](
@@ -277,6 +286,8 @@ func (a *StatusAggregator) Run(ctx context.Context) {
 func (a *StatusAggregator) HasSynced() bool {
 	return a.fedObjectInformer.Informer().HasSynced() &&
 		a.clusterFedObjectInformer.Informer().HasSynced() &&
+		a.collectedStatusInformer.Informer().HasSynced() &&
+		a.clusterCollectedStatusInformer.Informer().HasSynced() &&
 		a.federatedInformer.HasSynced() &&
 		a.informerManager.HasSynced()
 }
@@ -357,14 +368,37 @@ func (a *StatusAggregator) reconcile(ctx context.Context, key reconcileKey) (sta
 	}
 
 	needUpdate = false
-	plugin := plugins.GetPlugin(key.gvk)
-	if plugin != nil {
-		newObj, newNeedUpdate, err := plugin.AggregateStatuses(ctx, sourceObject, fedObject, clusterObjs, clusterObjsUpToDate)
+	if coveragePlugin := plugins.GetCoveragePlugin(key.gvk); coveragePlugin != nil {
+		// A plugin declares coverage support: hand it the envelope when one was published. The
+		// retained IsResourcePropagated gate result (clusterObjsUpToDate) is passed through
+		// unchanged and is never bypassed by the envelope.
+		coverage, err := a.getCoverageEnvelope(key.namespace, federatedName)
+		if err != nil {
+			logger.Error(err, "Failed to get coverage envelope")
+			return worker.StatusError
+		}
+		if coverage != nil {
+			sourceObject, needUpdate, err = coveragePlugin.AggregateCoverage(
+				ctx, sourceObject, fedObject, coverage, clusterObjsUpToDate,
+			)
+			if err != nil {
+				return worker.StatusError
+			}
+		} else {
+			sourceObject, needUpdate, err = a.aggregateWithLegacyPlugin(
+				ctx, key, sourceObject, fedObject, clusterObjs, clusterObjsUpToDate,
+			)
+			if err != nil {
+				return worker.StatusError
+			}
+		}
+	} else {
+		sourceObject, needUpdate, err = a.aggregateWithLegacyPlugin(
+			ctx, key, sourceObject, fedObject, clusterObjs, clusterObjsUpToDate,
+		)
 		if err != nil {
 			return worker.StatusError
 		}
-		sourceObject = newObj
-		needUpdate = newNeedUpdate
 	}
 
 	if needUpdate {
@@ -518,4 +552,53 @@ func (a *StatusAggregator) listFTCWithStatusAggregationEnabled() []*fedcorev1a1.
 		}
 	}
 	return res
+}
+
+// getCoverageEnvelope loads the optional CollectedStatusCoverage envelope published for the given
+// FederatedObject. A missing CollectedStatus object or one without an envelope yields (nil, nil),
+// so callers transparently fall back to the legacy aggregation path.
+func (a *StatusAggregator) getCoverageEnvelope(
+	namespace, federatedName string,
+) (*fedcorev1a1.CollectedStatusCoverage, error) {
+	collectedStatus, err := collectedstatusadapters.GetFromLister(
+		a.collectedStatusInformer.Lister(),
+		a.clusterCollectedStatusInformer.Lister(),
+		namespace, federatedName,
+	)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return collectedStatus.GetGenericCollectedStatus().Coverage, nil
+}
+
+// aggregateWithLegacyPlugin runs the pre-coverage aggregation path and removes any coverage
+// aggregate annotation left over from a previously enabled envelope.
+func (a *StatusAggregator) aggregateWithLegacyPlugin(
+	ctx context.Context,
+	key reconcileKey,
+	sourceObject *unstructured.Unstructured,
+	fedObject fedcorev1a1.GenericFederatedObject,
+	clusterObjs map[string]interface{},
+	clusterObjsUpToDate bool,
+) (*unstructured.Unstructured, bool, error) {
+	plugin := plugins.GetPlugin(key.gvk)
+	if plugin == nil {
+		return sourceObject, false, nil
+	}
+
+	newObj, needUpdate, err := plugin.AggregateStatuses(
+		ctx, sourceObject, fedObject, clusterObjs, clusterObjsUpToDate,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	removed, err := annotation.RemoveAnnotation(newObj, common.StatusCoverageAggregateAnnotation)
+	if err != nil {
+		return nil, false, err
+	}
+	return newObj, needUpdate || removed, nil
 }

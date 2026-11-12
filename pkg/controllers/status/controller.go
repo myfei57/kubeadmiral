@@ -184,6 +184,8 @@ func NewStatusController(
 				return true
 			}
 			return lastApplied.IsStatusCollectionEnabled() != latest.IsStatusCollectionEnabled() ||
+				lastApplied.IsStatusCoverageEnabled() != latest.IsStatusCoverageEnabled() ||
+				lastApplied.GetCoverageStrategy() != latest.GetCoverageStrategy() ||
 				(lastApplied.Spec.StatusCollection != nil && latest.Spec.StatusCollection != nil &&
 					!reflect.DeepEqual(lastApplied.Spec.StatusCollection.Fields, latest.Spec.StatusCollection.Fields))
 		},
@@ -426,6 +428,21 @@ func (s *StatusController) reconcile(
 
 	collectedStatus := newCollectedStatusObject(fedObject, clusterStatuses)
 
+	// The coverage envelope is opt-in: when disabled, only the legacy clusters fields are
+	// published and behavior is unchanged. When enabled, every cluster in the explicit target set
+	// (including not-ready and not-yet-synced ones) gets an explicit observation entry.
+	if typeConfig.IsStatusCoverageEnabled() {
+		coverage := s.buildCoverage(
+			ctx,
+			fedObject,
+			typeConfig,
+			templateGVK,
+			templateQualifiedName,
+			coverageFromStatus(existingStatus),
+		)
+		collectedStatus.GetGenericCollectedStatus().Coverage = coverage
+	}
+
 	if rsDigestsAnnotation != "" {
 		collectedStatus.SetAnnotations(map[string]string{common.LatestReplicasetDigestsAnnotation: rsDigestsAnnotation})
 	}
@@ -446,10 +463,12 @@ func (s *StatusController) reconcile(
 			return worker.StatusError
 		}
 	} else if !reflect.DeepEqual(existingStatus.GetGenericCollectedStatus().Clusters, collectedStatus.GetGenericCollectedStatus().Clusters) ||
+		!reflect.DeepEqual(existingStatus.GetGenericCollectedStatus().Coverage, collectedStatus.GetGenericCollectedStatus().Coverage) ||
 		!reflect.DeepEqual(collectedStatus.GetLabels(), existingStatus.GetLabels()) ||
 		(rsDigestsAnnotation != "" && !hasRSDigestsAnnotation) {
 		collectedStatus.GetLastUpdateTime().Time = time.Now()
 		existingStatus.GetGenericCollectedStatus().Clusters = collectedStatus.GetGenericCollectedStatus().Clusters
+		existingStatus.GetGenericCollectedStatus().Coverage = collectedStatus.GetGenericCollectedStatus().Coverage
 		existingStatus.SetLabels(collectedStatus.GetLabels())
 		anns := existingStatus.GetAnnotations()
 		if anns == nil {

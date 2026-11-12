@@ -111,6 +111,21 @@ type StatusCollectionConfig struct {
 	// corresponds to its path in the source object's schema.
 	// E.g. `metadata.creationTimestamp`.
 	Fields []string `json:"fields,omitempty"`
+	// Coverage configures the optional CollectedStatusCoverage envelope. When absent or disabled,
+	// only the legacy collected-status fields are published and existing behavior is unchanged.
+	// +optional
+	Coverage *StatusCoverageConfig `json:"coverage,omitempty"`
+}
+
+// StatusCoverageConfig defines the configuration of the optional CollectedStatusCoverage
+// observation envelope.
+type StatusCoverageConfig struct {
+	// Whether or not to publish the coverage envelope.
+	Enabled bool `json:"enabled"`
+	// Strategy selects how the envelope may be aggregated. Defaults to StrictAll.
+	// +kubebuilder:default:=StrictAll
+	// +optional
+	Strategy CoverageStrategy `json:"strategy,omitempty"`
 }
 
 // StatusAggregationConfig defines the configurations for the StatusAggregation feature.

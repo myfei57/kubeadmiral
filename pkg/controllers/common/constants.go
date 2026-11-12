@@ -121,6 +121,11 @@ const (
 
 	LatestReplicasetDigestsAnnotation = DefaultPrefix + "latest-replicaset-digests"
 
+	// StatusCoverageAggregateAnnotation carries the aggregated CollectedStatusCoverage summary on
+	// the source object. Partial envelopes are published here as explicit ranges instead of being
+	// collapsed into precise (and misleading) status fields.
+	StatusCoverageAggregateAnnotation = DefaultPrefix + "status-coverage-aggregate"
+
 	// MigrationConfigurationAnnotation contains custom migration configuration from users.
 	MigrationConfigurationAnnotation = DefaultPrefix + "migration-configuration"
 	// AppliedMigrationConfigurationAnnotation contains the applied custom migration configuration.

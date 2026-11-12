@@ -50,6 +50,128 @@ spec:
                   - collectedFields
                 type: object
               type: array
+            coverage:
+              description: |-
+                Coverage is the optional per-cluster observation envelope for the explicit target cluster set.
+                It is only published when status collection coverage is explicitly enabled on the FederatedTypeConfig.
+              properties:
+                clusters:
+                  items:
+                    description: ClusterCoverage records the observation receipt for one target cluster.
+                    properties:
+                      cluster:
+                        description: Cluster is the name of the member cluster.
+                        type: string
+                      clusterUID:
+                        description: ClusterUID is the UID of the FederatedCluster object, used to detect cluster rebuilds.
+                        type: string
+                      error:
+                        description: Error records collection errors for the cluster, truncated to the configured error byte limit.
+                        type: string
+                      expectedGeneration:
+                        description: ExpectedGeneration is the member-object generation that a valid receipt is expected to carry.
+                        format: int64
+                        type: integer
+                      fields:
+                        items:
+                          description: FieldCoverage records the observation state of one configured field in one target cluster.
+                          properties:
+                            error:
+                              description: Error records field-level collection errors, truncated to the configured error byte limit.
+                              type: string
+                            path:
+                              description: Path is the dot-separated field path from the status collection configuration.
+                              type: string
+                            state:
+                              description: State is the field observation state.
+                              type: string
+                            value:
+                              description: Value carries the observed raw JSON value when State == Present.
+                              x-kubernetes-preserve-unknown-fields: true
+                          required:
+                            - path
+                            - state
+                          type: object
+                        type: array
+                      memberObjectGeneration:
+                        description: MemberObjectGeneration is the metadata.generation of the observed member object.
+                        format: int64
+                        type: integer
+                      memberObjectResourceVersion:
+                        description: MemberObjectResourceVersion is an opaque identity token and must never be parsed or compared numerically across clusters.
+                        type: string
+                      memberObjectUID:
+                        description: MemberObjectUID is the UID of the propagated member object.
+                        type: string
+                      ready:
+                        description: Ready records whether the cluster was ready at collection time.
+                        type: boolean
+                      reason:
+                        description: Reason supplements State with a machine-readable explanation.
+                        type: string
+                      state:
+                        description: State is the object-level observation state.
+                        type: string
+                    required:
+                      - cluster
+                      - ready
+                      - state
+                    type: object
+                  type: array
+                complete:
+                  description: Complete reports whether the envelope covers the entire target cluster set at the current propagation generation with every field present.
+                  type: boolean
+                configHash:
+                  description: ConfigHash identifies the status collection configuration. A configuration change makes previously published envelopes stale.
+                  type: string
+                federatedGeneration:
+                  description: FederatedGeneration is the metadata.generation of the FederatedObject at collection time.
+                  format: int64
+                  type: integer
+                observedClusters:
+                  description: ObservedClusters is the number of target clusters whose member object was observed at the current propagation generation.
+                  type: integer
+                placementHash:
+                  description: PlacementHash identifies the explicit target cluster set. A placement change makes previously published envelopes stale.
+                  type: string
+                protocolVersion:
+                  description: ProtocolVersion is the field-collection/coverage-publication protocol version under which the envelope was produced.
+                  type: string
+                sourceGeneration:
+                  description: SourceGeneration is the generation of the source object recorded on the FederatedObject at collection time.
+                  format: int64
+                  type: integer
+                stale:
+                  description: Stale reports that the envelope no longer matches the current protocol, configuration, placement or propagation generation.
+                  type: boolean
+                staleReasons:
+                  items:
+                    type: string
+                  type: array
+                strategy:
+                  description: Strategy is the aggregation strategy configured for this envelope.
+                  type: string
+                syncedGeneration:
+                  description: SyncedGeneration is the FederatedObject status.syncedGeneration at collection time.
+                  format: int64
+                  type: integer
+                targetClusters:
+                  description: TargetClusters is the size of the explicit target cluster set, including clusters that are not ready or not yet synced.
+                  type: integer
+                truncated:
+                  description: Truncated reports that entries were dropped because a collection limit was exceeded.
+                  type: boolean
+              required:
+                - protocolVersion
+                - strategy
+                - complete
+                - federatedGeneration
+                - configHash
+                - placementHash
+                - targetClusters
+                - observedClusters
+                - clusters
+              type: object
             kind:
               description: |-
                 Kind is a string value representing the REST resource this object represents.

@@ -304,6 +304,8 @@ func startStatusAggregatorController(
 		controllerCtx.FedClientset,
 		controllerCtx.FedInformerFactory.Core().V1alpha1().FederatedObjects(),
 		controllerCtx.FedInformerFactory.Core().V1alpha1().ClusterFederatedObjects(),
+		controllerCtx.FedInformerFactory.Core().V1alpha1().CollectedStatuses(),
+		controllerCtx.FedInformerFactory.Core().V1alpha1().ClusterCollectedStatuses(),
 		controllerCtx.FederatedInformerManager,
 		controllerCtx.InformerManager,
 		controllerCtx.Metrics,

@@ -92,6 +92,23 @@ func (f *FederatedTypeConfig) IsStatusCollectionEnabled() bool {
 	return f.Spec.StatusCollection != nil && f.Spec.StatusCollection.Enabled
 }
 
+// IsStatusCoverageEnabled reports whether the optional CollectedStatusCoverage envelope should be
+// published alongside the legacy collected-status fields.
+func (f *FederatedTypeConfig) IsStatusCoverageEnabled() bool {
+	return f.Spec.StatusCollection != nil && f.Spec.StatusCollection.Coverage != nil &&
+		f.Spec.StatusCollection.Coverage.Enabled
+}
+
+// GetCoverageStrategy returns the configured coverage strategy, defaulting to StrictAll when the
+// strategy is unset or unknown.
+func (f *FederatedTypeConfig) GetCoverageStrategy() CoverageStrategy {
+	if f.Spec.StatusCollection != nil && f.Spec.StatusCollection.Coverage != nil &&
+		f.Spec.StatusCollection.Coverage.Strategy == CoverageStrategyPartial {
+		return CoverageStrategyPartial
+	}
+	return CoverageStrategyStrictAll
+}
+
 func (a *APIResource) Namespaced() bool {
 	return a.Scope == apiextv1beta1.NamespaceScoped
 }

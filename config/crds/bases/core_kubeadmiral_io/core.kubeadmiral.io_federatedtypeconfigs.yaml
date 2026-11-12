@@ -128,6 +128,19 @@ spec:
                 statusCollection:
                   description: Configuration for StatusCollection. If left empty, the StatusCollection feature will be disabled.
                   properties:
+                    coverage:
+                      description: Coverage configures the optional CollectedStatusCoverage envelope.
+                      properties:
+                        enabled:
+                          description: Whether or not to publish the coverage envelope.
+                          type: boolean
+                        strategy:
+                          default: StrictAll
+                          description: Strategy selects how the envelope may be aggregated. Defaults to StrictAll.
+                          type: string
+                      required:
+                        - enabled
+                      type: object
                     enabled:
                       description: Whether or not to enable status collection.
                       type: boolean
