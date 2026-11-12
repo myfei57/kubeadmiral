@@ -37,6 +37,7 @@ import (
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/status"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/statusaggregator"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/sync"
+	"github.com/kubewharf/kubeadmiral/pkg/controllers/sync/propagationbarrier"
 )
 
 func startFederateController(
@@ -219,11 +220,34 @@ func startSyncController(
 	ctx context.Context,
 	controllerCtx *controllercontext.Context,
 ) (controllermanager.Controller, error) {
+	coreV1alpha1Informers := controllerCtx.FedInformerFactory.Core().V1alpha1()
+
+	// The barrier manager reuses the existing listers, persisted
+	// PropagatedVersion receipts and member-cluster informers. It keeps only
+	// bounded in-memory state, performs reads exclusively and is started by
+	// the sync controller.
+	barrierManager, err := propagationbarrier.NewKubeBarrierManager(propagationbarrier.KubeBarrierConfig{
+		Name:                             sync.SyncControllerName,
+		FedClient:                        controllerCtx.FedClientset.CoreV1alpha1(),
+		FederatedObjectInformer:          coreV1alpha1Informers.FederatedObjects(),
+		ClusterFederatedObjectInformer:   coreV1alpha1Informers.ClusterFederatedObjects(),
+		PropagatedVersionInformer:        coreV1alpha1Informers.PropagatedVersions(),
+		ClusterPropagatedVersionInformer: coreV1alpha1Informers.ClusterPropagatedVersions(),
+		FederatedClusterInformer:         coreV1alpha1Informers.FederatedClusters(),
+		FTCManager:                       controllerCtx.InformerManager,
+		FederatedInformerManager:         controllerCtx.FederatedInformerManager,
+		Limits:                           propagationbarrier.DefaultLimits(),
+		Logger:                           klog.Background(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error creating propagation barrier manager: %w", err)
+	}
+
 	syncController, err := sync.NewSyncController(
 		controllerCtx.KubeClientset,
 		controllerCtx.FedClientset,
-		controllerCtx.FedInformerFactory.Core().V1alpha1().FederatedObjects(),
-		controllerCtx.FedInformerFactory.Core().V1alpha1().ClusterFederatedObjects(),
+		coreV1alpha1Informers.FederatedObjects(),
+		coreV1alpha1Informers.ClusterFederatedObjects(),
 		controllerCtx.InformerManager,
 		controllerCtx.FederatedInformerManager,
 		controllerCtx.FedSystemNamespace,
@@ -235,6 +259,7 @@ func startSyncController(
 		controllerCtx.WorkerCount,
 		controllerCtx.CascadingDeletionWorkerCount,
 		controllerCtx.Metrics,
+		barrierManager,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating sync controller: %w", err)

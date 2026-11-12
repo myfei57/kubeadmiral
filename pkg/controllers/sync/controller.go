@@ -51,6 +51,7 @@ import (
 	fedcorev1a1informers "github.com/kubewharf/kubeadmiral/pkg/client/informers/externalversions/core/v1alpha1"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/common"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/sync/dispatch"
+	"github.com/kubewharf/kubeadmiral/pkg/controllers/sync/propagationbarrier"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/sync/status"
 	"github.com/kubewharf/kubeadmiral/pkg/controllers/util"
 	"github.com/kubewharf/kubeadmiral/pkg/stats"
@@ -111,6 +112,10 @@ type SyncController struct {
 	// For accessing FederatedResources (logical federated objects)
 	fedAccessor FederatedResourceAccessor
 
+	// Serves PropagationBarrier tokens and the WaitForPropagation API. It may
+	// be nil in unit tests that do not exercise barrier functionality.
+	barrierManager *propagationbarrier.Manager
+
 	// For events
 	eventRecorder record.EventRecorder
 
@@ -146,6 +151,7 @@ func NewSyncController(
 	syncWorkerCount int,
 	cascadingDeletionWorkerCount int,
 	metrics stats.Metrics,
+	barrierManager *propagationbarrier.Manager,
 ) (*SyncController, error) {
 	recorder := eventsink.NewDefederatingRecorderMux(kubeClient, SyncControllerName, 4)
 	logger = klog.LoggerWithValues(logger, "controller", SyncControllerName)
@@ -153,6 +159,7 @@ func NewSyncController(
 		fedClient:                     fedClient,
 		ftcManager:                    ftcManager,
 		fedInformerManager:            fedInformerManager,
+		barrierManager:                barrierManager,
 		clusterAvailableDelay:         clusterAvailableDelay,
 		clusterUnavailableDelay:       clusterUnavailableDelay,
 		reconcileOnClusterChangeDelay: time.Second * 3,
@@ -289,6 +296,9 @@ func NewSyncController(
 
 func (s *SyncController) Run(ctx context.Context) {
 	s.fedAccessor.Run(ctx)
+	if s.barrierManager != nil {
+		go s.barrierManager.Run(ctx)
+	}
 	go func() {
 		for {
 			item, shutdown := s.reconcileAllResourcesQueue.Get()
@@ -339,6 +349,33 @@ func (s *SyncController) HasSynced() bool {
 
 func (s *SyncController) IsControllerReady() bool {
 	return s.HasSynced()
+}
+
+// IssuePropagationBarrier issues a PropagationBarrier token pinned to the given
+// immutable propagation input identity. It performs no propagation itself; it
+// only records bounded, read-only waiter state.
+func (s *SyncController) IssuePropagationBarrier(
+	input propagationbarrier.IssueTokenInput,
+) (string, *propagationbarrier.PropagationBarrier, error) {
+	if s.barrierManager == nil {
+		return "", nil, fmt.Errorf("propagation barrier manager is not configured")
+	}
+	return s.barrierManager.Issue(input)
+}
+
+// WaitForPropagation waits until every target cluster of the token exhibits a
+// managed dispatch receipt and a matching member observation for the pinned
+// input identity. The global Synced condition or the newest CollectedStatus are
+// never treated as sufficient. Waiting is read-only and does not retry
+// business operations.
+func (s *SyncController) WaitForPropagation(
+	ctx context.Context,
+	opaqueToken string,
+) (*propagationbarrier.WaitOutcome, error) {
+	if s.barrierManager == nil {
+		return nil, fmt.Errorf("propagation barrier manager is not configured")
+	}
+	return s.barrierManager.WaitForPropagation(ctx, opaqueToken)
 }
 
 func (s *SyncController) getClusterClient(clusterName string) (dynamic.Interface, error) {
